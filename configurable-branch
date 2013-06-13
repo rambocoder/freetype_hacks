@@ -1,0 +1,208 @@
+commit a7b8b839a463dd92421f15d376e4d4717379b4fe
+Author: rambocoder <erlang@rambocoder.com>
+Date:   Thu Apr 11 15:35:46 2013 -0400
+
+    Changes for ChromeOS and FT_FILTER_PARAMS
+    export CHROMEOS_SHARPENING_STRENGTH=10
+    export CHROMEOS_GAMMA_STRENGTH=150
+    
+    # default values
+    export FT_FILTER_PARAMS="16 64 112 64 16"
+    export FT_FILTER_PARAMS="26 67 86 67 26"
+
+diff --git a/include/freetype/config/ftoption.h b/include/freetype/config/ftoption.h
+index 93e9eb5..164682f 100644
+--- a/include/freetype/config/ftoption.h
++++ b/include/freetype/config/ftoption.h
+@@ -92,7 +92,7 @@ FT_BEGIN_HEADER
+   /* This is done to allow FreeType clients to run unmodified, forcing     */
+   /* them to display normal gray-level anti-aliased glyphs.                */
+   /*                                                                       */
+-/* #define FT_CONFIG_OPTION_SUBPIXEL_RENDERING */
++#define FT_CONFIG_OPTION_SUBPIXEL_RENDERING
+ 
+ 
+   /*************************************************************************/
+@@ -577,7 +577,7 @@ FT_BEGIN_HEADER
+   /*   This option requires TT_CONFIG_OPTION_BYTECODE_INTERPRETER to be    */
+   /*   defined.                                                            */
+   /*                                                                       */
+-/* #define TT_CONFIG_OPTION_SUBPIXEL_HINTING */
++#define TT_CONFIG_OPTION_SUBPIXEL_HINTING
+ 
+ 
+   /*************************************************************************/
+diff --git a/run.sh b/run.sh
+new file mode 100755
+index 0000000..b71d69c
+--- /dev/null
++++ b/run.sh
+@@ -0,0 +1,7 @@
++#!/bin/sh
++
++./configure --prefix=$PWD/output
++make clean
++make
++make install
++cp $PWD/freetype2/output/lib/libfreetype.so.6.10.* /usr/lib64
+\ No newline at end of file
+diff --git a/src/base/ftlcdfil.c b/src/base/ftlcdfil.c
+index 0da4ba1..bc12482 100644
+--- a/src/base/ftlcdfil.c
++++ b/src/base/ftlcdfil.c
+@@ -287,8 +287,38 @@
+                             { 0x00, 0x55, 0x56, 0x55, 0x00 };
+     /* the values here sum up to a value larger than 256, */
+     /* providing a cheap gamma correction                 */
+-    static const FT_Byte  default_filter[5] =
+-                            { 0x10, 0x40, 0x70, 0x40, 0x10 };
++    static FT_Byte  default_filter[5] =
++                            { 0x1A, 0x43, 0x56, 0x43, 0x1A, };
++    /* { 0x10, 0x40, 0x70, 0x40, 0x10 }; */
++
++    int checked_filter_params_env = 0;
++
++    if ( checked_filter_params_env == 0 )
++    {
++      char *filter_params = getenv( "FT_FILTER_PARAMS" );
++      if ( filter_params != NULL && strcmp(filter_params, "") != 0 )
++      {
++        float f1, f2, f3, f4, f5;
++
++        int args_assigned = 0;
++        args_assigned = sscanf ( filter_params, "%f %f %f %f %f", &f1, &f2, &f3, &f4, &f5 );
++
++        if ( args_assigned == 5 )
++        {
++              printf("%f : %f : %f : %f : %f \n", f1, f2, f3, f4, f5);
++
++
++              default_filter[0] = (FT_Byte) (f1 * 1.0f);
++              default_filter[1] = (FT_Byte) (f2 * 1.0f);
++              default_filter[2] = (FT_Byte) (f3 * 1.0f);
++              default_filter[3] = (FT_Byte) (f4 * 1.0f);
++              default_filter[4] = (FT_Byte) (f5 * 1.0f);
++
++          }
++
++      }
++      checked_filter_params_env = 1;
++    }
+ 
+ 
+     if ( !library )
+diff --git a/src/smooth/ftsmooth.c b/src/smooth/ftsmooth.c
+index 8f5300d..415250b 100644
+--- a/src/smooth/ftsmooth.c
++++ b/src/smooth/ftsmooth.c
+@@ -25,7 +25,7 @@
+ #include "ftspic.h"
+ 
+ #include "ftsmerrs.h"
+-
++#include <math.h>
+ 
+   /* initialize renderer -- init its raster */
+   static FT_Error
+@@ -93,6 +93,47 @@
+       FT_Outline_Get_CBox( &slot->outline, cbox );
+   }
+ 
++  /* soften the sub-pixel anti-aliasing and sharpen */
++  static void
++  _ft_subpixel_sharpen( FT_Bitmap*      bitmap,
++                        FT_Render_Mode  mode,
++                        FT_Byte         cutoff,
++                        double          gamma_value )
++  {
++    static FT_Bool initialized_gamma = FALSE;
++    static unsigned short gamma_ramp[256];
++    FT_UInt   width   = (FT_UInt)bitmap->width;
++    FT_UInt   height  = (FT_UInt)bitmap->rows;
++    int    ii;
++    if (!initialized_gamma)
++    {
++      initialized_gamma = TRUE;
++      /* linear to voltage */
++      for ( ii = 0; ii < 256; ii++ )
++      {
++        gamma_ramp[ii] = (unsigned char)
++                         ( pow( (double)ii/255.0, gamma_value ) * 255.0f );
++        if (gamma_ramp[ii] < cutoff) {
++          gamma_ramp[ii] = 0;
++        }
++      }
++    }
++
++    /* horizontal in-place sub-pixel sharpening filter */
++    if ( mode == FT_RENDER_MODE_LCD)
++    {
++      FT_Byte*  line = bitmap->buffer;
++      for ( ; height > 0; height--, line += bitmap->pitch )
++      {
++        FT_UInt  xx;
++        for ( xx = 0; xx < width; xx++ )
++        {
++          line[xx] = gamma_ramp[line[xx]];
++        }
++      }
++    }
++  }
++
+ 
+   /* convert a slot's glyph image into a bitmap */
+   static FT_Error
+@@ -304,6 +345,53 @@
+           vec->y /= 3;
+     }
+ 
++    int          chromeos_style_sharpening_strength = 100;
++    int          checked_chromeos_style_sharpening_strength = 0;
++    int          chromeos_style_gamma_strength = 100;
++    int          checked_chromeos_style_gamma_strength = 0;
++
++    if ( checked_chromeos_style_gamma_strength == 0)
++    {
++      char *chromeos_style_gamma_strength_env = getenv( "CHROMEOS_GAMMA_STRENGTH" );
++      if ( chromeos_style_gamma_strength_env != NULL )
++      {
++        sscanf ( chromeos_style_gamma_strength_env, "%d", &chromeos_style_gamma_strength );
++        if      (chromeos_style_gamma_strength > 1000 )
++          chromeos_style_gamma_strength = 100;
++        else if (chromeos_style_gamma_strength < 0 )
++          chromeos_style_gamma_strength = 0;
++      }
++      checked_chromeos_style_gamma_strength = 1;
++      printf("chromeos_style_gamma_strength %d \n", chromeos_style_gamma_strength);
++
++    }
++
++    if ( checked_chromeos_style_sharpening_strength == 0)
++    {
++      char *chromeos_style_sharpening_strength_env = getenv( "CHROMEOS_SHARPENING_STRENGTH" );
++      if ( chromeos_style_sharpening_strength_env != NULL )
++      {
++        sscanf ( chromeos_style_sharpening_strength_env, "%d", &chromeos_style_sharpening_strength );
++        if      (chromeos_style_sharpening_strength > 1000 )
++          chromeos_style_sharpening_strength = 100;
++        else if (chromeos_style_sharpening_strength < 0 )
++          chromeos_style_sharpening_strength = 0;
++      }
++      checked_chromeos_style_sharpening_strength = 1;
++      printf("chromeos_style_sharpening_strength %d \n", chromeos_style_sharpening_strength);
++
++    }
++
++    FT_Byte cutoff = (FT_Byte)(0.25 * 255.0) * (chromeos_style_sharpening_strength / 100.0);
++
++    double gamma_value = 1.0 * (chromeos_style_gamma_strength / 100.0);
++
++    /* These should be controllable */
++    /* FT_Byte cutoff = (FT_Byte)(0.25 * 255.0);
++    double gamma_value = 1.2; */
++    /* sharpen the glyphs */
++    _ft_subpixel_sharpen( bitmap, mode, cutoff, gamma_value );
++
+     if ( error )
+       goto Exit;
+ 
