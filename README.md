@@ -8,7 +8,7 @@ Clone the latest libfreetype
 ```
 git clone http://git.sv.nongnu.org/r/freetype/freetype2.git
 cd freetype2
-patch -p1 < ../configurable-branch
+patch -p1 < ../configurable-branch.diff
 ./autogen.sh
 chmod u+x run.sh
 ./run.sh
